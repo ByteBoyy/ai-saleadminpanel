@@ -1,33 +1,30 @@
-import { Component, OnInit, inject } from '@angular/core';
+import { Component, OnInit, inject, computed, signal } from '@angular/core';
 import { CommonModule } from '@angular/common';
 import { FormGroup, FormBuilder, Validators, ReactiveFormsModule } from '@angular/forms';
 import { lastValueFrom } from 'rxjs';
 import { ToastrService } from 'ngx-toastr';
-
 import { AuthService } from 'src/app/modules/layout/services/auth.service';
 import { Role, RoleDisplayNames } from 'src/app/enums/role.enum';
 import { HttpErrorResponse } from '@angular/common/http';
 import { CommonService } from 'src/app/modules/layout/services/common.service';
 import { TableFooterComponent } from '../table/components/table-footer/table-footer.component';
+import { TableFilterService } from '../table/services/table-filter.service';
+import { AngularSvgIconModule } from 'angular-svg-icon';
 
 @Component({
   selector: 'app-users',
   standalone: true,
-  imports: [CommonModule, ReactiveFormsModule, TableFooterComponent],
+  imports: [CommonModule, ReactiveFormsModule, TableFooterComponent, AngularSvgIconModule],
   templateUrl: './users.component.html',
   styleUrl: './users.component.css',
 })
 export class UsersComponent implements OnInit {
-  // State variables
   isAddModalBoxVisible = false;
   isUpdate = false;
   isDeleteModalBoxVisible = false;
   selectedUser: any | null = null;
   isLoading = false;
   isSuspended = false;
-
-  // Data
-  users: any[] = [];
   RoleDisplayNames = RoleDisplayNames;
   roleOptions = [
     { label: 'Super Admin', value: Role.SuperAdmin },
@@ -35,56 +32,95 @@ export class UsersComponent implements OnInit {
     { label: 'User', value: Role.User },
   ];
 
-  // Form
   userForm: FormGroup;
 
-  // Services
   private readonly authService = inject(AuthService);
   private readonly fb = inject(FormBuilder);
   private readonly toastr = inject(ToastrService);
   private readonly commonSrv = inject(CommonService);
+  private readonly filterService = inject(TableFilterService);
 
   constructor() {
     this.userForm = this.fb.group({
       id: [''],
       name: ['', Validators.required],
       email: ['', [Validators.required, Validators.email]],
+      country: ['', Validators.required],
       role: [null, Validators.required],
       suspended: [false],
     });
   }
 
-  ngOnInit(): void {
+  async ngOnInit(): Promise<void> {
     const currentUser = this.commonSrv.getUser();
     if (Number(currentUser?.role) !== Number(Role.SuperAdmin)) {
       this.roleOptions = this.roleOptions.filter((option) => option.value !== Role.SuperAdmin);
     }
 
-    this.loadUsers();
+    await this.loadUsers();
+    this.resetFilters();
   }
 
-  // Utility
+  resetFilters(): void {
+    this.filterService.searchField.set('');
+    this.filterService.statusField.set('""');
+    this.filterService.roleField.set('');
+  }
   getRoleDisplay(role: string | number): string {
     return this.RoleDisplayNames[+role as keyof typeof RoleDisplayNames];
   }
 
-  // Load all users
+  readonly filteredUsers = computed(() => {
+    const users = this.users(); // ✅ signal access
+    const searchTerm = this.filterService.searchField().toLowerCase();
+    const statusFilter = this.filterService.statusField();
+    const roleFilter = this.filterService.roleField();
+
+    if (!users || users.length === 0) return [];
+
+    let filtered = [...users];
+
+    if (searchTerm.trim() !== '') {
+      filtered = filtered.filter(
+        (user) =>
+          (user.fullName && user.fullName.toLowerCase().includes(searchTerm)) ||
+          (user.email && user.email.toLowerCase().includes(searchTerm)) ||
+          (user.country && user.country.toLowerCase().includes(searchTerm)),
+      );
+    }
+
+    if (statusFilter && statusFilter !== '') {
+      if (statusFilter === '1') {
+        filtered = filtered.filter((user) => !user.isSuspended);
+      } else if (statusFilter === '2') {
+        filtered = filtered.filter((user) => user.isSuspended);
+      }
+    }
+
+    if (roleFilter && roleFilter !== '') {
+      filtered = filtered.filter((user) => user.role && user.role.toString() === roleFilter);
+    }
+
+    return filtered;
+  });
+
+  users = signal<any[]>([]);
+
   async loadUsers(): Promise<void> {
     this.isLoading = true;
-    this.authService.getUsers().subscribe({
-      next: (data) => {
-        this.isLoading = false;
-        this.users = data.data;
-      },
-      error: (error) => {
-        this.isLoading = false;
-        if (error instanceof HttpErrorResponse) {
-          this.toastr.error(error.error?.message || 'Error loading users');
-        } else {
-          this.toastr.error('An unexpected error occurred while loading users');
-        }
-      },
-    });
+    try {
+      const data = await lastValueFrom(this.authService.getUsers());
+      this.isLoading = false;
+      this.users.set(data.data || []);
+    } catch (error: unknown) {
+      this.isLoading = false;
+      this.users.set([]);
+      if (error instanceof HttpErrorResponse) {
+        this.toastr.error(error.error?.message || 'Error loading users');
+      } else {
+        this.toastr.error('An unexpected error occurred while loading users');
+      }
+    }
   }
 
   // Modal controls
@@ -100,29 +136,31 @@ export class UsersComponent implements OnInit {
     this.isDeleteModalBoxVisible = !this.isDeleteModalBoxVisible;
   }
 
-  // Populate form for update
   update(id: string): void {
     this.isUpdate = true;
     this.isAddModalBoxVisible = true;
-    this.selectedUser = this.users.find((user) => user.id === id);
-    if (Number(this.selectedUser.role) === Role.SuperAdmin) {
-      this.userForm.get('role')?.disable();
-    } else {
-      this.userForm.get('role')?.enable();
-    }
+
+    this.selectedUser = this.users().find((user) => user.id === id);
+
     if (this.selectedUser) {
+      if (Number(this.selectedUser.role) === Role.SuperAdmin) {
+        this.userForm.get('role')?.disable();
+      } else {
+        this.userForm.get('role')?.enable();
+      }
+
       this.userForm.patchValue({
         id: this.selectedUser.id,
         name: this.selectedUser.fullName,
         email: this.selectedUser.email,
+        country: this.selectedUser.country,
         role: this.selectedUser.role,
         suspended: this.selectedUser.suspended ?? false,
       });
     }
   }
-
   delete(id: string): void {
-    this.selectedUser = this.users.find((user) => user.id === id);
+    this.selectedUser = this.users().find((user) => user.id === id);
     this.toggleDeleteModalBox();
   }
 
@@ -147,7 +185,6 @@ export class UsersComponent implements OnInit {
     this.toggleDeleteModalBox();
   }
 
-  // Form submission
   async onSubmit(event: Event): Promise<void> {
     event.preventDefault();
 
@@ -164,7 +201,8 @@ export class UsersComponent implements OnInit {
           role: this.userForm.value.role,
           fullName: this.userForm.value.name,
           email: this.userForm.value.email,
-          suspended: this.userForm.value.suspended, // <-- Add this
+          country: this.userForm.value.country,
+          suspended: this.userForm.value.suspended,
         }),
       );
       this.isLoading = false;
@@ -197,5 +235,20 @@ export class UsersComponent implements OnInit {
           this.toastr.error('Failed to update suspension status');
         },
       });
+  }
+
+  onSearchChange(value: Event) {
+    const input = value.target as HTMLInputElement;
+    this.filterService.searchField.set(input.value);
+  }
+
+  onStatusChange(value: Event) {
+    const selectElement = value.target as HTMLSelectElement;
+    this.filterService.statusField.set(selectElement.value);
+  }
+
+  onRoleChange(value: Event) {
+    const selectElement = value.target as HTMLSelectElement;
+    this.filterService.roleField.set(selectElement.value);
   }
 }
